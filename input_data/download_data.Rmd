@@ -1,0 +1,21 @@
+---
+title: "Routine to download input data"
+---
+
+
+## Install packages
+
+```{r packages, message=FALSE, warning=FALSE}
+rm(list=ls())
+
+if(!require("pacman")) install.packages("pacman"); library(pacman)
+p_load(here)
+```
+
+## Download data from Zenodo
+
+```{r download}
+download.file(url = "https://zenodo.org/records/18172827/files/Stavanger_input_data.zip", destfile = here("input_data", "Stavanger_input_data.zip"))
+unzip(zipfile = here("input_data", "Stavanger_input_data.zip"), exdir = here("input_data"))
+file.remove(here("input_data", "Stavanger_input_data.zip"))
+```

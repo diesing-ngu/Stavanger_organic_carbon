@@ -6,4 +6,4 @@
 # This ensures we all have the same folders,
 # but prevents their contents from being pushed to the remote repository. 
 !.gitignore
-!scripts
+!download_data.Rmd
