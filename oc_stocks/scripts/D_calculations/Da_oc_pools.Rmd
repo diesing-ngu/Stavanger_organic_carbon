@@ -1,0 +1,38 @@
+---
+title: "Organic carbon pools"
+output: html_notebook
+---
+
+# Preparations
+
+## Install packages
+
+```{r packages, message=FALSE, warning=FALSE}
+if(!require("pacman")) install.packages("pacman"); library(pacman)
+p_load(here,
+       sf,
+       terra
+       )
+```
+
+
+# Calculations
+
+## Load required data
+
+```{r load_data}
+OCS <- rast(here("oc_stocks", "data", "ready", "OCS_corr.tif"))
+OCS_pi90 <- rast(here("oc_stocks", "data", "ready", "OCS_pi90.tif"))
+OCS_aoa <- rast(here("oc_stocks", "data", "ready", "OCS_aoa.tif"))
+```
+
+
+## Calculate organic carbon pool (tonnes)
+
+```{r oc_pool}
+area <- res(OCS)[1] * res(OCS)[2]
+
+OCP <- as.numeric(global(OCS, sum, na.rm = TRUE) * area / 1000)
+unc <- as.numeric(global(OCS_pi90, sum, na.rm = TRUE) * area / 1000)
+OCP_aoa <- as.numeric(global((OCS * OCS_aoa), sum, na.rm = TRUE) * area / 1000)
+```

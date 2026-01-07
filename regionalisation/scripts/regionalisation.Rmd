@@ -1,0 +1,212 @@
+---
+title: "Regionalisation of the Environment"
+author: "Markus Diesing"
+output: 
+  html_document: 
+    toc: yes
+---
+
+# Packages
+
+```{r packages, echo=TRUE, message=FALSE, warning=FALSE}
+if(!require("pacman")) install.packages("pacman"); library(pacman)
+p_load(here,
+       terra,
+       sf,
+       RStoolbox,
+       ggplot2,
+       ggpubr,
+       gridExtra
+       )
+```
+
+
+# Loading data
+
+## Creating a rasterstack
+
+```{r rasterstack, message=FALSE, warning=FALSE}
+cri <- rast(here("cri", "data", "ready", "CRI_median.tif"))
+d13c <- rast(here("delta13c", "data", "ready", "d13c_median.tif"))
+ocs <- rast(here("oc_stocks", "data", "ready", "OCS_corr.tif"))
+
+vars <- c(cri, d13c, ocs)
+names(vars) <- c("CRI", "delta13C", "OCS")
+```
+
+
+## shp files 
+
+These will be used at the end to create a figure.
+
+```{r shp}
+study_site <- st_transform(read_sf(here("regionalisation", "data", "raw", "study_site.shp")), crs(vars))
+land <- st_transform(read_sf(here("regionalisation", "data", "raw", "land.shp")), crs(vars))
+ero_trsp <- st_transform(read_sf(here("regionalisation", "data", "raw", "erosion_transport.shp")), crs(vars))
+```
+
+
+# Normalise raster layers prior to PCA
+
+Performs normalisation (scaling) and centering, i.e. divide by standard deviation
+
+```{r normalisation}
+vars.norm <- normImage(vars, norm = TRUE)
+vars.norm
+hist(vars.norm)
+```
+
+
+# kmeans classification 
+
+https://www.rdocumentation.org/packages/RStoolbox/versions/0.2.3/topics/unsuperclass
+
+## Specify the maximum number of clusters to be analysed
+
+```{r max_number_of_clusters}
+max_cl <- 20
+```
+
+## How many clusters?
+
+```{r how_many_clusters}
+df_total <- data.frame()
+for (i in 1:max_cl) {
+  set.seed(25)
+  unC <- unsuperClass(vars.norm[[1:nlyr(vars.norm)]], nSamples = 4000, nClasses = i, nStarts = 100, 
+                      norm = FALSE, clusterMap = TRUE, algorithm = "Hartigan-Wong")
+  
+  stat <- (unC[["model"]][["tot.withinss"]])
+  df <- data.frame(i,stat)
+  df_total <- rbind(df_total,df)
+}
+```
+
+## Plot graph
+
+```{r graph}
+elbow_plot <- ggplot(df_total,aes(i,stat)) + geom_bar(stat = "identity") +
+              xlab("Number of clusters") + ylab("total within sum of squares ") +
+              scale_x_continuous(breaks = c(1:max_cl))
+elbow_plot
+
+ggsave(filename = "elbow_plot.jpg", plot = elbow_plot, device = "jpeg", path = here("figures"), height = 10, width = 15, units = "cm", dpi = 500)
+```
+
+## Specify the number of clusters to be used
+
+based on the graph above
+
+```{r select_number_of_clusters}
+n.cl <- 4
+```
+
+## Run k-means clustering
+
+```{r k_means}
+set.seed(25)
+unC <- unsuperClass(vars.norm, 
+                    nSamples = 10000, 
+                    nClasses = n.cl, 
+                    nStarts = 100, 
+                    norm = FALSE, 
+                    clusterMap = TRUE, 
+                    algorithm = "Hartigan-Wong")
+
+unC$model
+```
+
+
+## Change cluster number by means of delta 13C
+
+```{r change_cluster_number}
+lut <- matrix(nrow = n.cl, ncol = 2)
+lut[,1] <- as.numeric(names(sort(unC$model$centers[,2], decreasing = TRUE)))
+lut[,2] <- c(1:n.cl)
+
+regions <- classify(unC$map, lut)
+```
+
+
+## Define colour palette
+
+```{r col_pal}
+col_pal <- c('#1f78b4', '#a6cee3','#b2df8a','#33a02c', '#fb9a99', '#e31a1c', '#fdbf6f', '#ff7f00', '#cab2d6', '#6a3d9a', '#ffff99', '#b15928')
+```
+
+
+## Plot regions
+
+```{r plot_regions, warning=FALSE}
+ggR(regions, geom_raster = TRUE, forceCat = TRUE) +
+  scale_fill_manual(values = col_pal, na.value = NA)
+```
+
+
+# Export Geotiff
+
+```{r export_geotiff, warning=FALSE}
+writeRaster(regions, here("regionalisation", "data", "ready", "regions.tif"), overwrite = TRUE)
+```
+
+# Violin plots
+
+```{r violin plots}
+r <- c(regions, vars)
+smp <- as.data.frame(spatSample(x = r, size = 10000, method = "random", na.rm = TRUE))
+smp[,1] <- as.factor(smp[,1])
+names(smp)[1] <- "Cluster"
+
+for (i in 2:ncol(smp)) {
+  print(ggplot(smp, aes(x = Cluster, y = smp[,i], fill = Cluster)) +
+  geom_violin() +
+ scale_fill_manual(values = col_pal) +
+ scale_y_continuous(name = names(smp[i])) +
+ theme(axis.title.x = element_blank()) +
+  theme(legend.position = "none"))
+  }
+```
+
+# Figure for publication
+
+```{r figure, warning=FALSE}
+AoI <- ext(regions)
+land <- st_crop(land, AoI)
+
+p0 <- ggR(regions, geom_raster = TRUE, forceCat = TRUE) + 
+  geom_sf(data = ero_trsp, colour = NA) + 
+  geom_sf(data = land, fill = "darkgrey") +
+  geom_sf(data = study_site, fill = NA, linewidth = 1.5) +
+  scale_fill_manual(values = col_pal, na.value = NA) +
+  theme_bw() +
+  theme(axis.title = element_blank()) +
+  theme(legend.position = "none" ) + 
+  ggpubr::rotate_y_text()
+
+p1 <- ggplot(smp, aes(x = Cluster, y = CRI, fill = Cluster)) +
+  geom_boxplot() +
+  scale_fill_manual(values = col_pal) +
+  scale_y_continuous(name = "CRI (-)") +
+  theme(axis.title.x = element_blank()) +
+  theme(legend.position = "none")
+p2 <- ggplot(smp, aes(x = Cluster, y = delta13C, fill = Cluster)) +
+  geom_boxplot()+
+  scale_fill_manual(values = col_pal) +
+  scale_y_continuous(name = expression(paste(delta^{13}, "C (‰)"))) +
+  theme(axis.title.x = element_blank()) +
+  theme(legend.position = "none")
+p3 <- ggplot(smp, aes(x = Cluster, y = OCS, fill = Cluster)) +
+  geom_boxplot()+
+  scale_fill_manual(values = col_pal) +
+  scale_y_continuous(name = expression(OC~stock~(kg~m^{-2}))) +
+  theme(axis.title.x = element_blank()) +
+  theme(legend.position = "none")
+
+lay <- rbind(c(1,1,1),
+             c(1,1,1),
+             c(1,1,1),
+             c(3,2,4))
+
+p <- grid.arrange(p0, p2, p3, p1, nrow=4, layout_matrix=lay)
+ggsave( "regions.tiff", plot = p, device = "tiff", path = here("regionalisation", "figures"), height = 26, width = 30, units = "cm", dpi = 500, type ="cairo")
+```

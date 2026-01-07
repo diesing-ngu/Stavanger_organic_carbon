@@ -1,0 +1,319 @@
+---
+title: "Modelling"
+output: html_notebook
+---
+
+# Preparations
+
+## Install packages
+
+```{r packages, message=FALSE, warning=FALSE}
+if(!require("pacman")) install.packages("pacman"); library(pacman)
+p_load(here,
+       sf,
+       terra,
+       dplyr,
+       twosamples,
+       caret,
+       quantregForest,
+       ModelMetrics,
+       ggplot2,
+       forcats,
+       CAST,
+       doParallel)
+```
+
+
+## Load required data
+
+```{r load_data}
+rm_resp <- read.csv(here("cri", "data", "interim", "rm_resp.csv"))
+resp <- read_sf(here("cri", "data", "interim", "resp.shp"))
+predictors <- rast(here("cri", "data", "interim", "predictors_aoi.tif"))
+AoI <- read_sf(here("cri", "data", "interim", "AoI.shp"))
+```
+
+
+# Modelling
+
+## K-nearest neighbour distance matching
+
+```{r nndm}
+knndmfolds <- knndm(tpoints = resp,
+                    modeldomain = AoI,
+                    k = 10,
+                    samplesize = 2000)
+```
+
+
+## Plot geographic distances
+
+```{r geodist_plot, message=FALSE}
+dist_geogr <- geodist(resp, 
+                      AoI, 
+                      type = "geo",
+                      cvfolds = knndmfolds$indx_test,
+                      cvtrain = knndmfolds$indx_train,
+                      )
+
+p <- plot(dist_geogr, unit = "km")
+p
+
+jpeg(filename = here("cri", "figures", "geodist_plot2.jpg"), width = 15, height = 10, units = "cm", res = 300)
+p
+dev.off()
+```
+
+
+## Model tuning
+
+A Quantile Regression Forest model is tuned. Predictor variables are selected in a forward feature selection approach and various values of the mtry parameter are tested in a spatial k-fold cross validation.
+
+The maximum number of iterations can be calculated upfront, based on the number of pre-selected predictors:
+
+```{r max_iter}
+factorial(nlyr(predictors))/(factorial(2)*factorial(nlyr(predictors)-2)) + sum(c((nlyr(predictors)-2):1))
+```
+
+
+### Forward feature selection
+
+The best combination of predictor variables (features) is found in a forward feature selection process.
+
+*Note: The index is commented out, meaning that knndm is not applied. This was reasonable, as the sampling design gave a randomly distributed dataset (see geographic distance plots).*
+
+```{r ffs, message=FALSE, warning=FALSE}
+nCores <- detectCores()
+cl <- makePSOCKcluster(nCores - 1)
+registerDoParallel(cl)
+
+set.seed(42)
+
+model <- ffs(rm_resp[,names(predictors)],
+               rm_resp$CRI,
+               method="qrf",
+               what = 0.5,
+               replace = FALSE,
+               importance = TRUE,
+               trControl = trainControl(method = "CV",
+                                        number = 10,
+                                        savePredictions = "final",
+                                        #index = knndmfolds$indx_train,
+                                        allowParallel = TRUE),
+               verbose = FALSE)
+
+stopCluster(cl)
+
+model
+
+sel_preds <- model$selectedvars
+```
+
+
+### FFS plot
+
+Plot of RMSE over the model runs.
+
+```{r ffs_plot, warning=FALSE}
+plot(model)
+```
+
+
+## Validation statistics
+
+The validation results of the optimal QRF model.
+
+Note that these are the statistics based on the predicted values of the selected model. These differ from the values from the tuning (above), which are the means of the k predictions based on the folds.
+
+```{r validation_stats}
+t <- data.frame(model$pred$pred, model$pred$obs)
+
+validation <- data.frame(me=numeric(), rmse=numeric(), r2=numeric())
+validation[1,1] <- round(sum(t$model.pred.obs - t$model.pred.pred)/nrow(t), 3)
+validation[1,2] <- round(rmse(t$model.pred.obs, t$model.pred.pred), 3)
+validation[1,3] <- round(cor(t$model.pred.obs, t$model.pred.pred)^2, 3)
+
+colnames(validation) <- c("ME", "RMSE", "r2")
+rownames(validation) <- NULL
+validation
+```
+
+
+## Validation plot
+
+```{r validation_plot, message=FALSE}
+val_plot <- ggplot(t, aes(x = model.pred.pred, y = model.pred.obs)) +
+            geom_point() +
+            geom_smooth(method = "lm") +
+            geom_abline(intercept = 0, slope = 1, colour = "grey", linewidth = 1.2) +
+            scale_fill_continuous(type = "viridis") +
+            theme_bw() +
+            scale_x_continuous(name = "Predicted value") +
+            scale_y_continuous(name = "Observed value") +
+            ggtitle("CRI")
+
+val_plot
+
+jpeg(filename = here("cri", "figures", "validation_plot_CRI.jpg"), width = 15, height = 10, units = "cm", res = 300)
+val_plot
+dev.off()
+```
+
+
+## Variable importance
+
+```{r variable_importance_plot, warning=FALSE}
+imp <- varImp(model$finalModel, scale = FALSE)
+imp$Predictor <- rownames(imp)
+rownames(imp) <- NULL
+imp <- imp[order(imp[1], decreasing = TRUE), c(2, 1)]
+colnames(imp)[2] <- "IncMSE"
+imp
+
+impfig <- imp %>%
+  mutate(Predictor = fct_reorder(Predictor, IncMSE)) %>%
+  ggplot( aes(x=Predictor, y=IncMSE)) +
+    geom_bar(stat="identity", fill="#f68060", alpha=.6, width=.4) +
+    coord_flip() +
+    xlab("") +
+    ylab("% increase in MSE") +
+    theme_bw()
+    
+impfig
+
+jpeg(filename = here("cri", "figures", "var_imp.jpg"), width = 15, height = 10, units = "cm", res = 300)
+impfig
+dev.off()
+```
+
+
+## Partial dependence
+
+Partial dependence plots give a graphical depiction of the marginal effect of a variable on the response.
+
+```{r partial_plots}
+m2 <- model$finalModel
+class(m2) <- "randomForest"
+
+for (i in 1:length(sel_preds)) {
+  partialPlot(x = m2, pred.data = rm_resp[sel_preds], x.var = sel_preds[i], main = "", xlab = sel_preds[i], ylab = "CRI (-)")
+  jpeg(filename = here("cri", "figures", paste0(sel_preds[i],".jpg")), width = 15, height = 10, units = "cm", res = 300)
+  partialPlot(x = m2, pred.data = rm_resp[sel_preds], x.var = sel_preds[i], main = "", xlab = sel_preds[i], ylab = "delta 13C (‰)")
+  dev.off()
+}
+
+```
+
+
+# Predict QRF model
+
+## Predict the response variable
+
+*Needs to be eventually fixed: Predictions are based on raster package.*
+
+```{r predict_response, message=FALSE, warning=FALSE}
+preds <- raster::stack(predictors[[sel_preds]])
+CRI_median <- rast(predict(preds, model$finalModel, what = 0.5))
+CRI_p95 <- rast(predict(preds, model$finalModel, what = 0.95))
+CRI_p5 <- rast(predict(preds, model$finalModel, what = 0.05))
+CRI_pi90 <- CRI_p95 - CRI_p5
+CRI_pir <- CRI_pi90 / CRI_median
+```
+
+
+## Histogram of predicted organic carbon stocks
+
+```{r hist_CRI}
+hist(CRI_median, breaks = 20, main ="", xlab = "Predicted CRI (-)")
+
+jpeg(filename = here("cri", "figures", "histogram_CRI_pred.jpg"), width = 15, height = 10, units = "cm", res = 300)
+hist(CRI_median, breaks = 20, main ="", xlab = "Predicted CRI (-)")
+dev.off()
+```
+
+
+## Area of applicability
+
+*Note: CVtest and CVtrain are commented out, as knndm was not applied.*
+
+```{r aoa, warning=FALSE}
+CRI_trainDI <- trainDI(model = model,
+                       variables = sel_preds,
+                       #CVtest = knndmfolds$indx_test,
+                       #CVtrain = knndmfolds$indx_train
+                       )
+
+print(CRI_trainDI)
+
+CRI_aoa <- aoa(newdata = predictors, 
+                model = model,
+                trainDI = CRI_trainDI,
+                variables = sel_preds,
+)
+
+plot(CRI_aoa)
+
+
+fr <- freq(CRI_aoa$AOA)
+print(paste0("AOA = ", round(100*fr$count[2]/ sum(fr$count),2), "% of pixels"))
+```
+
+
+## Plot results
+
+```{r plot_results}
+plot(CRI_median, main = "CRI median")
+plot(CRI_pi90, main = "90% prediction interval")
+plot(CRI_pir, main = "Prediction interval ratio")
+plot(CRI_aoa$DI, main = "Dissimilarity index")
+plot(CRI_aoa$AOA, main = "Area of applicability")
+```
+
+
+## Convert AOA from raster to polygon
+
+```{r aoa_poly}
+aoa_poly <- as.polygons(CRI_aoa$AOA, dissolve = TRUE)
+plot(aoa_poly)
+
+write_sf(st_as_sf(aoa_poly), dsn = here("cri", "data", "ready"), layer = "CRI_aoa", driver = "ESRI Shapefile")
+```
+
+
+## Reproject
+
+*This is a temporary fix, as long as predictions use the raster package (see above).*
+
+```{r reproject}
+CRI_median <- project(x = CRI_median, y = "EPSG:25832", res = 50)
+CRI_pi90 <- project(x = CRI_pi90, y = "EPSG:25832", res = 50)
+CRI_pir <- project(x = CRI_pir, y = "EPSG:25832", res = 50)
+CRI_aoa <- project(x = CRI_aoa$AOA, y = "EPSG:25832", res = 50)
+```
+
+
+
+## Export results
+
+```{r export_results, message=FALSE, warning=FALSE}
+writeRaster(CRI_median, here("cri", "data", "ready", "CRI_median.tif"), overwrite = TRUE)
+writeRaster(CRI_pi90, here("cri", "data", "ready", "CRI_pi90.tif"), overwrite = TRUE)
+writeRaster(CRI_pir, here("cri", "data", "ready", "CRI_pir.tif"), overwrite = TRUE)
+writeRaster(CRI_aoa, here("cri", "data", "ready", "CRI_aoa.tif"), overwrite = TRUE)
+```
+
+
+## Output a log file
+
+```{r log}
+sink(file = here("cri", "data", "ready", "model_log.txt"))
+model
+print("Final Model")
+paste0("ME = ", validation[1,1])
+paste0("RMSE = ", validation[1,2])
+paste0("R2 = ", validation[1,3])
+paste0("AOA = ", round(100*fr$count[2]/ sum(fr$count),2), "% of pixels")
+sink()
+```
+
+
