@@ -90,7 +90,7 @@ elbow_plot <- ggplot(df_total,aes(i,stat)) + geom_bar(stat = "identity") +
               scale_x_continuous(breaks = c(1:max_cl))
 elbow_plot
 
-ggsave(filename = "elbow_plot.jpg", plot = elbow_plot, device = "jpeg", path = here("figures"), height = 10, width = 15, units = "cm", dpi = 500)
+ggsave(filename = "elbow_plot.jpg", plot = elbow_plot, device = "jpeg", path = here("regionalisation", "figures"), height = 10, width = 15, units = "cm", dpi = 500)
 ```
 
 ## Specify the number of clusters to be used
